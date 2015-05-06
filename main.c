@@ -18,7 +18,7 @@ const int IS_FREE = 0;
 int init_socket_for_connection(int port)
 {
     int listen_socket = -1;
-  //создаем сокет  
+  //создаем сокет
     listen_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket == -1)
     {
@@ -34,7 +34,7 @@ int init_socket_for_connection(int port)
     {
         perror("Bind");
         exit(EXIT_FAILURE);
-    } 
+    }
     return listen_socket;
 }
 
@@ -46,61 +46,48 @@ int send_all_buffer(char* text, int fd, size_t length)
         int code = send(fd, text + current, length - current, 0);
         if (code == -1)
         {
-            return -1;
+            return current;
         }
         current += code;
     }
-}
-
-void send_back_to_all(char* text, const int* connections, int sender)
-{
-    size_t message_length = strlen(text) + 1;
-    for (size_t i = 0; i < MAX_CLIENT_NUMBER; ++i)
-    {
-        if (connections[i] != IS_FREE && i != sender)
-        {
-            send_all_buffer(text, connections[i], message_length);
-            printf("resended to %d\n", i);
-        }
-    }
+    return current;
 }
 
 void* process_client(void* arg)
 {
-    printf("thread started\n");
+    printf("Thread started\n");
     int* sock_ptr = (int*) arg;
     int sock = *sock_ptr;
-    //char buffer[BUFFER_SIZE];
     while (1)
     {
-        //char* pointer = buffer;
-      //читаем длину имени файла  
+      //читаем длину имени файла
         size_t name_len;
         int code;
         code = recv(sock, &name_len, sizeof(name_len), 0);
-        if (code <=0)
+        if (code <= 0)
         {
             break;
         }
-        printf("name length = %d\n", name_len);
-      //читаем имя файла  
+        printf("Receveing...");
+        printf("Name length = %d\n", name_len);
+      //читаем имя файла
         char* file_name = (char*) malloc(name_len + 1);
         code = recv(sock, file_name, name_len, 0);
-        if (code <=0)
+        if (code <= 0)
         {
             break;
         }
         file_name[name_len] = '\0';
-        printf("file name: %s\n", file_name);
-      //читаем длинну содуржимого  
+        printf("File name: %s\n", file_name);
+      //читаем длинну содержимого
         size_t content_size;
         code = recv(sock, &content_size, sizeof(content_size), 0);
         if (code <=0)
         {
             break;
         }
-        printf("data size = %d\n", content_size);
-      //читаем содержимое файла  
+        printf("Data size = %d\n", content_size);
+      //читаем содержимое файла
         char* buffer = (char*) malloc(content_size + 1);
         code = recv(sock, buffer, content_size, 0);
         if (code <=0)
@@ -108,14 +95,17 @@ void* process_client(void* arg)
             break;
         }
         buffer[content_size] = '\0';
-        printf("CONTECT:\n%s\n", buffer);
-      //создаем файлы  
+        printf("CONTENT:\n%s\n", buffer);
+      //создаем файлы
         FILE* file = fopen(file_name, "w");
         fwrite(buffer, 1, content_size, file);
+
         free(file_name);
         free(buffer);
         fclose(file);
     }
+    printf("Disconnected.\n");
+    *sock_ptr = IS_FREE;
     return NULL;
 }
 
@@ -123,61 +113,80 @@ void run_server(int port)
 {
     printf("Server started. Port is %d!\n", port);
     int listen_socket = init_socket_for_connection(port);
-    
+
     int active_connections[MAX_CLIENT_NUMBER];
     pthread_t client_threads[MAX_CLIENT_NUMBER];
     memset(active_connections, 0, MAX_CLIENT_NUMBER * sizeof(int));
-    
+
+    if (listen(listen_socket, 10) == -1)
+    {
+        perror("Listen");
+        exit(EXIT_FAILURE);
+    }
+
     while(1)
-    {  
-      //ждем подключений
-        printf("waiting...\n");
-        if (listen(listen_socket, 10) == -1)
-        {
-            perror("Listen");
-            exit(EXIT_FAILURE);
-        }
-        /*int code = select(max + 1, &read_set, NULL, NULL, NULL);
+    {
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(0, &read_set);
+        FD_SET(listen_socket, &read_set);
+      //ожидаем событий ввода  
+        int code = select(listen_socket + 1, &read_set, NULL, NULL, NULL);
         if (code == -1)
         {
             perror("Select error.");
             exit(EXIT_FAILURE);
-        }*/
-      //получили запрос на подключение
-        int connector_socket = accept(listen_socket, NULL, NULL);    
-        if (connector_socket == -1)
-        {
-            perror("Accept");
         }
-        else
+      //(1)получили запрос на подключение
+        if (FD_ISSET(listen_socket, &read_set))
         {
-            printf("New client connected!\n");
-          //добавляем нового клиента в список
-            ssize_t new_client_index = -1;
-            for (size_t i = 0; i < MAX_CLIENT_NUMBER; ++i)
+            int connector_socket = accept(listen_socket, NULL, NULL);
+            if (connector_socket == -1)
             {
-                if (active_connections[i] == IS_FREE)
+                perror("Accept");
+            }
+            else
+            {
+                printf("New client connected!\n");
+              //добавляем нового клиента в список
+                ssize_t new_client_index = -1;
+                for (size_t i = 0; i < MAX_CLIENT_NUMBER; ++i)
                 {
-                    active_connections[i] = connector_socket;
-                    new_client_index = i;
-                    break;
+                    if (active_connections[i] == IS_FREE)
+                    {
+                        active_connections[i] = connector_socket;
+                        new_client_index = i;
+                        break;
+                    }
+                }
+                if (new_client_index == -1)
+                {
+                    fprintf(stderr, "Too many clients.\n");
+                    exit(EXIT_FAILURE);
+                }
+              //запускаем обработку запросов клиента
+                if (pthread_create(client_threads + new_client_index, NULL, &process_client,
+                    active_connections + new_client_index) == -1)
+                {
+                    perror("pthread_create");
+                    exit(EXIT_FAILURE);
                 }
             }
-            if (new_client_index == -1)
+        }
+      //(2) нажатие на клавиатуре  
+        if (FD_ISSET(0, &read_set))
+        {
+            printf("Terminateing...\n");
+            for (size_t i = 0; i < MAX_CLIENT_NUMBER; ++i)
             {
-                fprintf(stderr, "Too many clients.\n");
-                exit(EXIT_FAILURE);
+                if (active_connections[i] != IS_FREE)
+                {
+                    pthread_join(client_threads[i], NULL);
+                }
             }
-          //запускаем обработку запросов клиента
-            if (pthread_create(client_threads + new_client_index, NULL, &process_client, 
-                active_connections + new_client_index) == -1)
-            {
-                perror("pthread_create");
-                exit(EXIT_FAILURE);
-            }
+            break;
         }
     }
-
     close(listen_socket);
     printf("Server terminated.\n");
 }
@@ -185,7 +194,7 @@ void run_server(int port)
 void run_client(int port, char* server_addr)
 {
     printf("Welcome!\n");
-  //создаем сокет  
+  //создаем сокет
     int write_socket = socket(AF_INET, SOCK_STREAM, 0);
     if(write_socket < 0)
     {
@@ -202,15 +211,14 @@ void run_client(int port, char* server_addr)
         perror("Connect");
         exit(EXIT_FAILURE);
     }
-    int read_code = 0;
     char buffer[BUFFER_SIZE];
     char* file_name = (char*) malloc(MAX_FILE_NAME_LENGTH);
-    size_t name_len;
 
     while (1)
     {
-      //получим имя файла  
+      //получим имя файла
         printf("File name: ");
+        size_t name_len;
         ssize_t read_code = getline(&file_name, &name_len, stdin);
         if (read_code <= 0)
         {
@@ -219,7 +227,7 @@ void run_client(int port, char* server_addr)
         name_len = read_code - 1;
         file_name[name_len] = '\0';
         printf("Name: %s(%u)\n", file_name, name_len);
-      //получим данные-содержимое файла  
+      //получим данные-содержимое файла
         printf("Print content:\n");
         read_code = fread(buffer, 1, BUFFER_SIZE, stdin);
         buffer[read_code] = '\0';
@@ -228,11 +236,15 @@ void run_client(int port, char* server_addr)
       //формируем пакет
         size_t total_length = sizeof(name_len) + name_len + sizeof(buffer_length) + buffer_length;
         char* pocket = (char*) malloc(total_length);
+      //записываем длинну названия файла
         size_t* pointer = (size_t*) pocket;
         *pointer = name_len;
+      //записываем название файла
         memcpy(pocket + sizeof(size_t), file_name, name_len);
-        pointer = (int*) (pocket + sizeof(size_t) + name_len);
+      //записываем размер содержимого
+        pointer = (size_t*) (pocket + sizeof(size_t) + name_len);
         *pointer = buffer_length;
+      //записываем содержимое
         memcpy(pocket + sizeof(size_t) * 2 + name_len, buffer, buffer_length);
         send_all_buffer(pocket, write_socket, total_length);
         free(pocket);
@@ -255,7 +267,7 @@ void read_args(int argc, char** argv, int* mode, char** addr, int* port)
         if (argc != 3)
         {
             fprintf(stderr, "Wrong arguments.\n");
-            exit(EXIT_FAILURE);       
+            exit(EXIT_FAILURE);
         }
         sscanf(argv[2], "%d", port);
         return;
@@ -266,7 +278,7 @@ void read_args(int argc, char** argv, int* mode, char** addr, int* port)
         if (argc != 4)
         {
             fprintf(stderr, "Wrong arguments.\n");
-            exit(EXIT_FAILURE);       
+            exit(EXIT_FAILURE);
         }
         sscanf(argv[2], "%d", port);
         *addr = argv[3];
