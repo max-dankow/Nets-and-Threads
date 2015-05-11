@@ -72,12 +72,6 @@ int receive_all_buffer(char* text, int fd, size_t length)
     }
 }
 
-void show_mem(char* ptr, size_t num)
-{
-    for (size_t i = 0; i < num; ++i)
-        printf("%c\n", ptr[i]);
-}
-
 int send_pocket_file(int sock, char* file_name)
 {
   //получаем размер файла  
@@ -122,6 +116,67 @@ int send_pocket_file(int sock, char* file_name)
     return 0;
 }
 
+int receive_pocket_file(int sock)
+{
+  //читаем длину имени файла
+    size_t name_len;
+    int code;
+    code = recv(sock, &name_len, sizeof(name_len), 0);
+    if (code <= 0)
+    {
+        return -1;
+    }
+    printf("Receveing...");
+    printf("Name length = %d\n", name_len);
+  //читаем имя файла
+    char* file_name = (char*) malloc(name_len + 1);
+    code = recv(sock, file_name, name_len, 0);
+    if (code <= 0)
+    {
+        free(file_name);
+        return -1;
+    }
+    file_name[name_len] = '\0';
+    printf("File name: %s\n", file_name);
+  //читаем длинну содержимого
+    size_t content_size;
+    code = recv(sock, &content_size, sizeof(content_size), 0);
+    if (code <= 0)
+    {
+        free(file_name);
+        return -1;
+    }
+    printf("Data size = %d\n", content_size);
+    char* buffer = (char*) malloc(POCKET_SIZE);
+    FILE* file = fopen(file_name, "w");
+  //будем отправлять весь файл кусками по POCKET_SIZE байт  
+    size_t received = 0;
+    while (received < content_size)
+    {
+        size_t to_recv;
+
+        if (content_size - received >= POCKET_SIZE)
+        {
+            to_recv = POCKET_SIZE;
+        }
+        else
+        {
+            to_recv = content_size - received;
+        }
+      //отправляем пакет  
+        if (receive_all_buffer(buffer, sock, to_recv) == -1)
+        {
+            break;
+        }
+        received += to_recv;
+        fwrite(buffer, 1, to_recv, file);
+    }
+    printf("end of read\n");
+    free(file_name);
+    free(buffer);
+    fclose(file);
+}
+
 void* process_client(void* arg)
 {
     printf("Thread started\n");
@@ -129,61 +184,10 @@ void* process_client(void* arg)
     int sock = *sock_ptr;
     while (1)
     {
-      //читаем длину имени файла
-        size_t name_len;
-        int code;
-        code = recv(sock, &name_len, sizeof(name_len), 0);
-        if (code <= 0)
+        if (receive_pocket_file(sock) == -1)
         {
             break;
         }
-        printf("Receveing...");
-        printf("Name length = %d\n", name_len);
-      //читаем имя файла
-        char* file_name = (char*) malloc(name_len + 1);
-        code = recv(sock, file_name, name_len, 0);
-        if (code <= 0)
-        {
-            break;
-        }
-        file_name[name_len] = '\0';
-        printf("File name: %s\n", file_name);
-      //читаем длинну содержимого
-        size_t content_size;
-        code = recv(sock, &content_size, sizeof(content_size), 0);
-        if (code <= 0)
-        {
-            break;
-        }
-        printf("Data size = %d\n", content_size);
-        char* buffer = (char*) malloc(POCKET_SIZE);
-        FILE* file = fopen(file_name, "w");
-        size_t received = 0;
-        while (received < content_size)
-        {
-            size_t to_recv;
-
-            if (content_size - received >= POCKET_SIZE)
-            {
-                to_recv = POCKET_SIZE;
-            }
-            else
-            {
-                to_recv = content_size - received;
-            }
-          //отправляем пакет  
-            if (receive_all_buffer(buffer, sock, to_recv) == -1)
-            {
-                break;
-            }
-
-            received += to_recv;
-            fwrite(buffer, 1, to_recv, file);
-        }
-        printf("end of read\n");
-        free(file_name);
-        free(buffer);
-        fclose(file);
     }
     printf("Disconnected.\n");
     *sock_ptr = IS_FREE;
