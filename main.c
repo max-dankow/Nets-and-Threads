@@ -17,6 +17,10 @@ const size_t MAX_CLIENT_NUMBER = 100;
 const size_t BUFFER_SIZE = 1024;
 const size_t POCKET_SIZE = 1024 * 1024;
 const size_t MAX_FILE_NAME_LENGTH = 256;
+const int CMD_PUSH_FILE = 0;
+const int CMD_PULL_FILE = 1;
+const int SERVER_ANSWER_FILE_EXIST = 1; 
+const int SERVER_ANSWER_FILE_NOT_EXIST = 0;
 const int IS_FREE = 0;
 
 int init_socket_for_connection(int port)
@@ -78,15 +82,15 @@ int send_pocket_file(int sock, char* file_name)
     struct stat info;
     if (stat(file_name, &info) == -1)
     {
-        perror("Can't get file info.\n");
-        exit(EXIT_FAILURE);
+        perror("Can't open file");
+        return -1;
     }
     size_t file_length = info.st_size;
   //открываем файл  
     int file_d = open(file_name, O_RDONLY);
     if (file_d == -1)
     {
-        perror("open");
+        perror("Can't open file");
         return -1;
     }
     size_t name_len = strlen(file_name);
@@ -126,7 +130,6 @@ int receive_pocket_file(int sock)
     {
         return -1;
     }
-    printf("Receveing...");
     printf("Name length = %d\n", name_len);
   //читаем имя файла
     char* file_name = (char*) malloc(name_len + 1);
@@ -184,10 +187,48 @@ void* process_client(void* arg)
     int sock = *sock_ptr;
     while (1)
     {
-        if (receive_pocket_file(sock) == -1)
+        int comand;
+        if (recv(sock, &comand, sizeof(comand), 0) <= 0)
         {
             break;
         }
+        printf("Comand: %d\n", comand);
+        if (comand == CMD_PUSH_FILE)
+        {
+            printf("Receiving...\n");
+            if (receive_pocket_file(sock) == -1)
+            {
+                break;
+            }
+            continue;
+        }
+        
+        if (comand == CMD_PULL_FILE)
+        {
+            size_t name_len;
+            receive_all_buffer(&name_len, sock, sizeof(name_len));
+            char* file_name = (char*) malloc(name_len + 1);
+            file_name[name_len] = '\0';
+            receive_all_buffer(file_name, sock, name_len);
+            printf("Try to send file %s...\n", file_name);
+            if (access(file_name, R_OK | F_OK) != -1)
+            {
+                printf("Success, sending...\n");
+              //отсылаем код результата - файл существует
+                send_all_buffer(&SERVER_ANSWER_FILE_EXIST, sock, sizeof(SERVER_ANSWER_FILE_EXIST));
+                send_pocket_file(sock, file_name);
+            }
+            else
+            {
+                perror("Can't open file.");
+              //отсылаем код результата - файл НЕ существует
+                send_all_buffer(&SERVER_ANSWER_FILE_NOT_EXIST, sock, sizeof(SERVER_ANSWER_FILE_EXIST));
+            }
+            free(file_name);
+            continue;
+        }
+        printf("Unknown operation code. Aborting...\n");
+        exit(EXIT_FAILURE);
     }
     printf("Disconnected.\n");
     *sock_ptr = IS_FREE;
@@ -301,18 +342,73 @@ void run_client(int port, char* server_addr)
 
     while (1)
     {
-      //получим имя файла
-        printf("File name: ");
-        size_t name_len;
-        ssize_t read_code = getline(&file_name, &name_len, stdin);
-        if (read_code <= 0)
+        printf("Command: ");
+      //создаем множество для мультиплексировния stdin и socket'a
+        fd_set read_set;
+        FD_ZERO(&read_set);
+        FD_SET(0, &read_set);
+        FD_SET(write_socket, &read_set);
+      //ожидаем событий ввода  
+        int code = select(write_socket + 1, &read_set, NULL, NULL, NULL);
+        if (code == -1)
         {
-            break;
+            perror("Select error.");
+            free(file_name);
+            exit(EXIT_FAILURE);
         }
-        name_len = read_code - 1;
-        file_name[name_len] = '\0';
-        printf("Name: %s(%u)\n", file_name, name_len);
-        send_pocket_file(write_socket, file_name);
+      //(1) ввод с клавиатуры
+        if (FD_ISSET(0, &read_set))
+        {
+          //получим имя файла
+            size_t name_len;
+            char comand[100];
+            ssize_t read_code = scanf("%s %s", comand, file_name);
+            if (read_code <= 0)
+            {
+                break;
+            }
+            name_len = strlen(file_name);
+            printf("Name: %s(%u)\n", file_name, name_len);
+            if (strcmp("push", comand) == 0)
+            {
+                printf("Sending...\n");
+              //отсылаем код команды  
+                send_all_buffer(&CMD_PUSH_FILE, write_socket, sizeof(CMD_PUSH_FILE));
+              //отсылаем основной пакет  
+                send_pocket_file(write_socket, file_name);
+                continue;
+            }
+            if (strcmp("pull", comand) == 0)
+            {
+                printf("Try to pull file %s\n", file_name);
+                size_t name_len = strlen(file_name);
+                send_all_buffer(&CMD_PULL_FILE, write_socket, sizeof(CMD_PUSH_FILE));
+                send_all_buffer(&name_len, write_socket, sizeof(name_len));
+                send_all_buffer(file_name, write_socket, name_len);
+                //send_pocket_file(write_socket, file_name);
+                continue;
+            }
+            printf("Use push <filename> to send file to server. Use pull <filename> to get file from server.\n");
+        }
+      //(2) сервер прислал ответ на запрос
+        if (FD_ISSET(write_socket, &read_set))
+        {
+            int answer;
+            receive_all_buffer(&answer, write_socket, sizeof(answer));
+            if (answer == SERVER_ANSWER_FILE_EXIST)
+            {
+                printf("Success!\n");
+                receive_pocket_file(write_socket);
+                continue;
+            }
+            else
+            {
+                printf("File not exist\n");
+                continue;
+            }
+            printf("Unknown server answer code. Aborting...\n");
+            exit(EXIT_FAILURE);
+        }
     }
     free(file_name);
     printf("Goodbye!\n");
