@@ -9,9 +9,13 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
 const size_t MAX_CLIENT_NUMBER = 100;
 const size_t BUFFER_SIZE = 1024;
+const size_t POCKET_SIZE = 1024 * 1024;
 const size_t MAX_FILE_NAME_LENGTH = 256;
 const int IS_FREE = 0;
 
@@ -53,6 +57,71 @@ int send_all_buffer(char* text, int fd, size_t length)
     return current;
 }
 
+int receive_all_buffer(char* text, int fd, size_t length)
+{
+    size_t current = 0;
+    while (current < length)
+    {
+        int code = recv(fd, text + current, length - current, 0);
+        //printf("%d, %d\n", code, current);
+        if (code == -1)
+        {
+            return -1;
+        }
+        current += code;
+    }
+}
+
+void show_mem(char* ptr, size_t num)
+{
+    for (size_t i = 0; i < num; ++i)
+        printf("%c\n", ptr[i]);
+}
+
+int send_pocket_file(int sock, char* file_name)
+{
+  //получаем размер файла  
+    struct stat info;
+    if (stat(file_name, &info) == -1)
+    {
+        perror("Can't get file info.\n");
+        exit(EXIT_FAILURE);
+    }
+    size_t file_length = info.st_size;
+  //открываем файл  
+    int file_d = open(file_name, O_RDONLY);
+    if (file_d == -1)
+    {
+        perror("open");
+        return -1;
+    }
+    size_t name_len = strlen(file_name);
+    send_all_buffer(&name_len, sock, sizeof(name_len));
+    send_all_buffer(file_name, sock, name_len);
+    send_all_buffer(&file_length, sock, sizeof(file_length));
+    size_t sended = 0;
+    char* text = (char*) malloc(POCKET_SIZE);
+    while (sended < file_length)
+    {
+        size_t to_send;
+        if (file_length - sended >= POCKET_SIZE)
+        {
+            to_send = POCKET_SIZE;
+        }
+        else
+        {
+            to_send = file_length - sended;
+        }
+        read(file_d, text, to_send);
+      //отправляем пакет  
+        send_all_buffer(text, sock, to_send);
+        sended += to_send;
+    }
+    free(text);
+    printf("%d\n", sended);
+    return 0;
+}
+
 void* process_client(void* arg)
 {
     printf("Thread started\n");
@@ -82,24 +151,36 @@ void* process_client(void* arg)
       //читаем длинну содержимого
         size_t content_size;
         code = recv(sock, &content_size, sizeof(content_size), 0);
-        if (code <=0)
+        if (code <= 0)
         {
             break;
         }
         printf("Data size = %d\n", content_size);
-      //читаем содержимое файла
-        char* buffer = (char*) malloc(content_size + 1);
-        code = recv(sock, buffer, content_size, 0);
-        if (code <=0)
-        {
-            break;
-        }
-        buffer[content_size] = '\0';
-        printf("CONTENT:\n%s\n", buffer);
-      //создаем файлы
+        char* buffer = (char*) malloc(POCKET_SIZE);
         FILE* file = fopen(file_name, "w");
-        fwrite(buffer, 1, content_size, file);
+        size_t received = 0;
+        while (received < content_size)
+        {
+            size_t to_recv;
 
+            if (content_size - received >= POCKET_SIZE)
+            {
+                to_recv = POCKET_SIZE;
+            }
+            else
+            {
+                to_recv = content_size - received;
+            }
+          //отправляем пакет  
+            if (receive_all_buffer(buffer, sock, to_recv) == -1)
+            {
+                break;
+            }
+
+            received += to_recv;
+            fwrite(buffer, 1, to_recv, file);
+        }
+        printf("end of read\n");
         free(file_name);
         free(buffer);
         fclose(file);
@@ -227,27 +308,7 @@ void run_client(int port, char* server_addr)
         name_len = read_code - 1;
         file_name[name_len] = '\0';
         printf("Name: %s(%u)\n", file_name, name_len);
-      //получим данные-содержимое файла
-        printf("Print content:\n");
-        read_code = fread(buffer, 1, BUFFER_SIZE, stdin);
-        buffer[read_code] = '\0';
-        size_t buffer_length = read_code;
-        printf("Content(%d): \n%s\n",read_code, buffer);
-      //формируем пакет
-        size_t total_length = sizeof(name_len) + name_len + sizeof(buffer_length) + buffer_length;
-        char* pocket = (char*) malloc(total_length);
-      //записываем длинну названия файла
-        size_t* pointer = (size_t*) pocket;
-        *pointer = name_len;
-      //записываем название файла
-        memcpy(pocket + sizeof(size_t), file_name, name_len);
-      //записываем размер содержимого
-        pointer = (size_t*) (pocket + sizeof(size_t) + name_len);
-        *pointer = buffer_length;
-      //записываем содержимое
-        memcpy(pocket + sizeof(size_t) * 2 + name_len, buffer, buffer_length);
-        send_all_buffer(pocket, write_socket, total_length);
-        free(pocket);
+        send_pocket_file(write_socket, file_name);
     }
     free(file_name);
     printf("Goodbye!\n");
